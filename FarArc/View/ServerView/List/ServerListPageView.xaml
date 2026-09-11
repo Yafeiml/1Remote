@@ -62,7 +62,14 @@
                 <!--drop effect-->
                 <Setter Property="AllowDrop" Value="true"/>
                 <EventSetter Event="MouseMove" Handler="ServerList_PreviewMouseMoveEvent"/>
+                <EventSetter Event="DragOver" Handler="ServerList_OnDragOver"/>
                 <EventSetter Event="Drop" Handler="ServerList_OnDrop"/>
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding DataContext.ServerOrderBy, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                 Value="{x:Static locality:EnumServerOrderBy.Custom}">
+                        <Setter Property="Cursor" Value="SizeAll"/>
+                    </DataTrigger>
+                </Style.Triggers>
                 <!--drop end event-->
             </Style>
 
@@ -480,6 +487,7 @@
                                 <Style TargetType="{x:Type GroupItem}">
                                     <Setter Property="AllowDrop" Value="true"/>
                                     <!--drop end event-->
+                                    <EventSetter Event="DragOver" Handler="ServerList_OnDragOver"/>
                                     <EventSetter Event="Drop" Handler="ServerList_OnDrop"/>
                                     <Setter Property="Template">
                                         <Setter.Value>

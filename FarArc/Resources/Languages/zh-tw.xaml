@@ -333,4 +333,7 @@
     <s:String x:Key="ListViewMode_Card">卡片</s:String>
     <s:String x:Key="ListViewMode_Tree">樹形</s:String>
     <s:String x:Key="Do not check for new version">不檢查新版本</s:String>
+    <s:String x:Key="Connection failed">連線失敗</s:String>
+    <s:String x:Key="Connection lost">連線已中斷</s:String>
+    <s:String x:Key="The remote connection could not be established or was interrupted.">無法建立遠端連線或連線意外中斷，請檢查主機位址、網路和遠端服務後重試。</s:String>
 </ResourceDictionary>

@@ -17,6 +17,8 @@ namespace FarArc.View.Host.ProtocolHosts
     public sealed partial class VncHost : HostBase
     {
         private readonly VNC _vncBase;
+        private bool _isClosing;
+        private bool _isResettingConnection;
 
         public static VncHost Create(VNC protocolServer)
         {
@@ -89,56 +91,52 @@ namespace FarArc.View.Host.ProtocolHosts
 
         public override void Conn()
         {
-            Status = ProtocolHostStatus.Connecting;
-            if (Vnc.IsConnected)
-                Vnc.Disconnect();
-            Status = ProtocolHostStatus.Connecting;
-            GridLoading.Visibility = Visibility.Visible;
-            VncFormsHost.Visibility = Visibility.Collapsed;
-            Vnc.VncPort = _vncBase.GetPort();
-            Vnc.GetPassword = () => UnSafeStringEncipher.DecryptOrReturnOriginalString(_vncBase.Password);
-            if (Vnc.VncPort <= 0)
-                Vnc.VncPort = 5900;
+            if (_isClosing) return;
             try
             {
-                Vnc.Connect(_vncBase.Address, false, _vncBase.VncWindowResizeMode == VNC.EVncWindowResizeMode.Stretch);
-                VncFormsHost.Visibility = Visibility.Visible;
-                GridLoading.Visibility = Visibility.Collapsed;
+                _isResettingConnection = true;
+                try
+                {
+                    if (Vnc.IsConnected)
+                        Vnc.Disconnect();
+                }
+                finally
+                {
+                    _isResettingConnection = false;
+                }
+                Status = ProtocolHostStatus.Connecting;
+                GridLoading.Visibility = Visibility.Visible;
                 GridMessageBox.Visibility = Visibility.Collapsed;
-                Status = ProtocolHostStatus.Connected;
+                VncFormsHost.Visibility = Visibility.Collapsed;
+                Vnc.VncPort = _vncBase.GetPort();
+                Vnc.GetPassword = () => UnSafeStringEncipher.DecryptOrReturnOriginalString(_vncBase.Password);
+                if (Vnc.VncPort <= 0)
+                    Vnc.VncPort = 5900;
+                Vnc.Connect(_vncBase.Address, false, _vncBase.VncWindowResizeMode == VNC.EVncWindowResizeMode.Stretch);
+                // Authentication failure can raise ConnectionLost and return without throwing.
+                if (!Vnc.IsConnected && Status != ProtocolHostStatus.Disconnected)
+                    ShowConnectionFailure(IoC.Translate("The remote connection could not be established or was interrupted."));
             }
             catch (Exception e)
             {
-                _invokeOnClosedWhenDisconnected = false;
-                VncFormsHost.Visibility = Visibility.Collapsed;
-                GridLoading.Visibility = Visibility.Visible;
-                GridMessageBox.Visibility = Visibility.Visible;
-
-                TbMessageTitle.Visibility = Visibility.Collapsed;
-                BtnReconn.Visibility = Visibility.Visible;
-                TbMessage.Text = e.Message;
+                ShowConnectionFailure(e.Message);
             }
         }
 
         public override void ReConn()
         {
-            VncFormsHost.Visibility = Visibility.Collapsed;
-            GridLoading.Visibility = Visibility.Visible;
-            GridMessageBox.Visibility = Visibility.Collapsed;
-            _invokeOnClosedWhenDisconnected = false;
             Conn();
-            _invokeOnClosedWhenDisconnected = true;
         }
 
         public override void Close()
         {
+            if (_isClosing) return;
+            _isClosing = true;
+            Vnc.ConnectComplete -= OnConnected;
+            Vnc.ConnectionLost -= OnConnectionLost;
             Status = ProtocolHostStatus.Disconnected;
             if (Vnc.IsConnected)
                 Vnc.Disconnect();
-
-            // Unsubscribe from events to prevent memory leaks
-            Vnc.ConnectComplete -= OnConnected;
-            Vnc.ConnectionLost -= OnConnectionLost;
 
             base.Close();
         }
@@ -161,25 +159,30 @@ namespace FarArc.View.Host.ProtocolHosts
 
         private void OnConnected(object sender, EventArgs e)
         {
+            if (_isClosing) return;
             Status = ProtocolHostStatus.Connected;
             VncFormsHost.Visibility = Visibility.Visible;
             GridLoading.Visibility = Visibility.Collapsed;
             GridMessageBox.Visibility = Visibility.Collapsed;
         }
 
-        private bool _invokeOnClosedWhenDisconnected = true;
-
         private void OnConnectionLost(object? sender, EventArgs e)
+        {
+            if (_isClosing || _isResettingConnection) return;
+            ShowConnectionFailure(IoC.Translate("The remote connection could not be established or was interrupted."));
+        }
+
+        private void ShowConnectionFailure(string reason)
         {
             Status = ProtocolHostStatus.Disconnected;
             VncFormsHost.Visibility = Visibility.Collapsed;
             GridLoading.Visibility = Visibility.Collapsed;
             GridMessageBox.Visibility = Visibility.Visible;
-            TbMessageTitle.Visibility = Visibility.Collapsed;
+            TbMessageTitle.Text = IoC.Translate(HasConnected ? "Connection lost" : "Connection failed");
+            TbMessageTitle.Visibility = Visibility.Visible;
+            TbMessage.Visibility = Visibility.Visible;
             BtnReconn.Visibility = Visibility.Visible;
-            TbMessage.Text = "Connection lost...";
-            if (_invokeOnClosedWhenDisconnected)
-                base.OnClosed?.Invoke(base.ConnectionId);
+            TbMessage.Text = $"{_vncBase.DisplayName} ({_vncBase.Address}:{_vncBase.Port})\n\n{reason}";
         }
 
         #endregion connection

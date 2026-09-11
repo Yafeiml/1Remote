@@ -333,4 +333,7 @@
     <s:String x:Key="ListViewMode_Card">Card</s:String>
     <s:String x:Key="ListViewMode_Tree">Tree</s:String>
     <s:String x:Key="Do not check for new version">Do not check for new version</s:String>
+    <s:String x:Key="Connection failed">Connection failed</s:String>
+    <s:String x:Key="Connection lost">Connection lost</s:String>
+    <s:String x:Key="The remote connection could not be established or was interrupted.">The remote connection could not be established or was interrupted.</s:String>
 </ResourceDictionary>

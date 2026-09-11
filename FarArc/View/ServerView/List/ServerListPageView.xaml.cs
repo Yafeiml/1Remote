@@ -15,6 +15,7 @@ using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 
@@ -22,6 +23,10 @@ namespace FarArc.View.ServerView
 {
     public partial class ServerListPageView : ServerViewBase
     {
+        private const string DragSourceDataFormat = "FarArc.ServerList.DragSource";
+        private Point? _dragStartPoint;
+        private DependencyObject? _dragStartElement;
+
         public ServerListPageView()
         {
             InitializeComponent();
@@ -147,6 +152,19 @@ namespace FarArc.View.ServerView
         private ProtocolBaseViewModel? _shiftSelectStartItem = null;
         private void ServerList_OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
         {
+            if (e.ChangedButton == MouseButton.Left
+                && sender is DependencyObject dragSource
+                && e.OriginalSource is DependencyObject originalSource
+                && !IsInteractiveDragSource(originalSource)
+                && MyVisualTreeHelper.VisualUpwardSearch<ListBoxItem>(dragSource) is { } dragItem)
+            {
+                SetDragStart(dragItem, e);
+            }
+            else
+            {
+                ResetDragStart();
+            }
+
             if (e.ClickCount == 1 && sender is DependencyObject obj)
             {
                 // shift or ctrl + mouse button down to select item
@@ -199,70 +217,127 @@ namespace FarArc.View.ServerView
                 // 阻止 GroupItem 中 expander header 中的移动按钮响应 expander header 点击展开/隐藏事件
                 if (MyVisualTreeHelper.VisualUpwardSearch<GroupItem>(obj) != null)
                 {
+                    if (e.ChangedButton == MouseButton.Left
+                        && MyVisualTreeHelper.VisualUpwardSearch<GroupItem>(obj) is { } groupItem)
+                    {
+                        SetDragStart(groupItem, e);
+                    }
                     e.Handled = true;
                 }
             }
         }
 
+        private void SetDragStart(DependencyObject element, MouseButtonEventArgs e)
+        {
+            _dragStartElement = element;
+            _dragStartPoint = e.GetPosition(this);
+        }
+
+        private void ResetDragStart()
+        {
+            _dragStartElement = null;
+            _dragStartPoint = null;
+        }
+
+        private bool HasExceededDragThreshold(DependencyObject element, MouseEventArgs e)
+        {
+            if (!ReferenceEquals(_dragStartElement, element) || _dragStartPoint == null)
+                return false;
+
+            var current = e.GetPosition(this);
+            return Math.Abs(current.X - _dragStartPoint.Value.X) >= SystemParameters.MinimumHorizontalDragDistance
+                   || Math.Abs(current.Y - _dragStartPoint.Value.Y) >= SystemParameters.MinimumVerticalDragDistance;
+        }
+
+        private static bool IsInteractiveDragSource(DependencyObject source)
+        {
+            return source is ButtonBase or TextBoxBase or NoteDisplayAndEditor
+                   || MyVisualTreeHelper.VisualUpwardSearch<ButtonBase>(source) != null
+                   || MyVisualTreeHelper.VisualUpwardSearch<TextBoxBase>(source) != null
+                   || MyVisualTreeHelper.VisualUpwardSearch<NoteDisplayAndEditor>(source) != null;
+        }
+
 
         private void ServerList_PreviewMouseMoveEvent(object sender, MouseEventArgs e)
         {
-            //SimpleLogHelper.Debug($"{e.LeftButton} + {sender is Grid}");
-            if (e.LeftButton == MouseButtonState.Pressed)
+            if (e.LeftButton != MouseButtonState.Pressed)
             {
-                try
+                ResetDragStart();
+                return;
+            }
+
+            try
+            {
+                // drag ListBoxItem
+                if (sender is ListBoxItem { DataContext: ProtocolBaseViewModel protocol } listBoxItem
+                    && protocol is not ProtocolBaseViewModelDummy
+                    && LocalityListViewService.Settings.ServerOrderBy == EnumServerOrderBy.Custom
+                    && protocol.HoverNoteDisplayControl?.PopupNote.IsOpen != true
+                    && HasExceededDragThreshold(listBoxItem, e))
                 {
-                    // drag ListBoxItem
-                    if (sender is ListBoxItem { DataContext: ProtocolBaseViewModel protocol } listBoxItem
-                        && LocalityListViewService.Settings.ServerOrderBy == EnumServerOrderBy.Custom
-                        && protocol.HoverNoteDisplayControl?.PopupNoteContent.Content == null)
+                    var dataObj = new DataObject();
+                    dataObj.SetData(DragSourceDataFormat, listBoxItem);
+                    DragDrop.DoDragDrop(listBoxItem, dataObj, DragDropEffects.Move);
+                    listBoxItem.IsSelected = true;
+                    ResetDragStart();
+                }
+                // drag GroupItem
+                else if (sender is DependencyObject obj)
+                {
+                    if (e.OriginalSource is DependencyObject os
+                        && MyVisualTreeHelper.VisualUpwardSearch<NoteDisplayAndEditor>(os) != null)
+                    {
+                        return;
+                    }
+
+                    var groupItem = sender as GroupItem ?? MyVisualTreeHelper.VisualUpwardSearch<GroupItem>(obj);
+                    if (groupItem != null && HasExceededDragThreshold(groupItem, e))
                     {
                         var dataObj = new DataObject();
-                        dataObj.SetData("DragSource", listBoxItem);
-                        DragDrop.DoDragDrop(listBoxItem, dataObj, DragDropEffects.Move);
-                        listBoxItem.IsSelected = true;
+                        dataObj.SetData(DragSourceDataFormat, groupItem);
+                        DragDrop.DoDragDrop(groupItem, dataObj, DragDropEffects.Move);
+                        ResetDragStart();
                     }
-                    // drag GroupItem
-                    else if (sender is DependencyObject obj)
-                    {
-                        if (e.OriginalSource is DependencyObject os)
-                        {
-                            if (null != MyVisualTreeHelper.VisualUpwardSearch<NoteDisplayAndEditor>(os))
-                            {
-                                return;
-                            }
-                        }
-                        GroupItem? groupItem = null;
-                        if (sender is GroupItem gi) // 直接 drag GroupItem
-                        {
-                            groupItem = gi;
-                        }
-                        else // drag GroupItem header 中的元素
-                        {
-                            groupItem = MyVisualTreeHelper.VisualUpwardSearch<GroupItem>(obj);
-                        }
-                        if (groupItem != null)
-                        {
-                            var dataObj = new DataObject();
-                            dataObj.SetData("DragSource", groupItem);
-                            DragDrop.DoDragDrop(groupItem, dataObj, DragDropEffects.Move);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    var ps = new Dictionary<string, string>
-                    {
-                        { "Sender", sender.GetType().Name },
-                        { "e.Source", e.Source.GetType().Name },
-                        { "e.OriginalSource", e.OriginalSource.GetType().Name }
-                    };
-                    UnifyTracing.Error(ex, properties: ps);
                 }
             }
+            catch (Exception ex)
+            {
+                ResetDragStart();
+                var ps = new Dictionary<string, string>
+                {
+                    { "Sender", sender.GetType().Name },
+                    { "e.Source", e.Source.GetType().Name },
+                    { "e.OriginalSource", e.OriginalSource.GetType().Name }
+                };
+                UnifyTracing.Error(ex, properties: ps);
+            }
         }
+
+        private void ServerList_OnDragOver(object sender, DragEventArgs e)
+        {
+            var canDrop = false;
+            if (LocalityListViewService.Settings.ServerOrderBy == EnumServerOrderBy.Custom
+                && e.Data.GetData(DragSourceDataFormat) is ListBoxItem { DataContext: ProtocolBaseViewModel source }
+                && source is not ProtocolBaseViewModelDummy
+                && sender is ListBoxItem { DataContext: ProtocolBaseViewModel target }
+                && target is not ProtocolBaseViewModelDummy)
+            {
+                canDrop = source != target && IsSameDataSource(source, target);
+            }
+            else if (LvServerCards.IsGrouping
+                     && e.Data.GetData(DragSourceDataFormat) is GroupItem
+                     && IoC.Get<DataSourceService>().AdditionalSources.Any())
+            {
+                canDrop = true;
+            }
+
+            e.Effects = canDrop ? DragDropEffects.Move : DragDropEffects.None;
+            e.Handled = true;
+        }
+
         private void ServerList_OnDrop(object sender, DragEventArgs e)
         {
+            e.Handled = true;
             try
             {
                 if (e.OriginalSource is DependencyObject os)
@@ -275,53 +350,70 @@ namespace FarArc.View.ServerView
 
                 // item move
                 if (LocalityListViewService.Settings.ServerOrderBy == EnumServerOrderBy.Custom
-                    && e.Data.GetData("DragSource") is ListBoxItem { DataContext: ProtocolBaseViewModel toBeMovedProtocol } listBoxItem
+                    && e.Data.GetData(DragSourceDataFormat) is ListBoxItem { DataContext: ProtocolBaseViewModel toBeMovedProtocol }
+                    && toBeMovedProtocol is not ProtocolBaseViewModelDummy
                     && sender is ListBoxItem { DataContext: ProtocolBaseViewModel target } targetListBoxItem
-                    && toBeMovedProtocol != target)
+                    && target is not ProtocolBaseViewModelDummy
+                    && toBeMovedProtocol != target
+                    && IsSameDataSource(toBeMovedProtocol, target))
                 {
-                    var items = LvServerCards.Items.Cast<ProtocolBaseViewModel>().ToList();
-                    int removedIdx = items.IndexOf(toBeMovedProtocol);
-                    int targetIdx = items.IndexOf(target);
+                    var viewModel = DataContext as ServerListPageViewModel ?? IoC.Get<ServerListPageViewModel>();
+                    var visibleItems = LvServerCards.Items
+                        .OfType<ProtocolBaseViewModel>()
+                        .Where(item => item is not ProtocolBaseViewModelDummy && IsSameDataSource(item, target))
+                        .ToList();
+                    int removedIdx = visibleItems.IndexOf(toBeMovedProtocol);
+                    int targetIdx = visibleItems.IndexOf(target);
 #if DEBUG
-                    SimpleLogHelper.Debug($"Before Drop:" + string.Join(", ", items.Select(x => x.Server.DisplayName)));
+                    SimpleLogHelper.Debug($"Before Drop:" + string.Join(", ", visibleItems.Select(x => x.Server.DisplayName)));
                     SimpleLogHelper.Debug($"Drop: {toBeMovedProtocol.Server.DisplayName}({removedIdx}) -> {target.Server.DisplayName}({targetIdx})");
 #endif
                     bool isNextDoor = Math.Abs(removedIdx - targetIdx) == 1; // 是否相邻
-
-                    int append = 0; // 0: 前面，1: 后面
-                    if (isNextDoor && removedIdx < targetIdx) // 如果被移动的item在目标之前且相邻，则插入到目标后面，即 targetIdx += 1;
-                    {
-                        append = 1;
-                    }
-                    else if (isNextDoor == false && e.GetPosition(targetListBoxItem).Y > targetListBoxItem.ActualHeight / 2) // 如果二者不相邻，则根据位置判断插入到目标前面还是后面
-                    {
-                        append = 1;
-                    }
+                    var pointer = e.GetPosition(targetListBoxItem);
+                    var pointerAfterTarget = viewModel.CurrentViewInListPage == EnumServerViewStatus.Card
+                        ? pointer.X > targetListBoxItem.ActualWidth / 2
+                        : pointer.Y > targetListBoxItem.ActualHeight / 2;
+                    var insertAfter = (isNextDoor && removedIdx < targetIdx)
+                                      || (!isNextDoor && pointerAfterTarget);
 
                     if (removedIdx >= 0
                         && targetIdx >= 0
-                        && removedIdx != targetIdx)
+                        && removedIdx != targetIdx
+                        && viewModel.VmServerList
+                            .Where(item => item is not ProtocolBaseViewModelDummy && IsSameDataSource(item, target))
+                            .OrderBy(item => item.CustomOrder)
+                            .ThenBy(item => item.Id)
+                            .ToList() is { } fullGroupOrder
+                        && VisibleItemReorderHelper.TryMove(
+                            fullGroupOrder,
+                            visibleItems,
+                            toBeMovedProtocol,
+                            target,
+                            insertAfter,
+                            out var reorderedGroup))
                     {
-                        items.RemoveAt(removedIdx);
-                        targetIdx = items.IndexOf(target) + append;  // re-calc targetIdx since collection changed
-                        if (targetIdx > items.Count)
-                        {
-                            items.Add(toBeMovedProtocol);
-                        }
-                        else
-                        {
-                            items.Insert(targetIdx, toBeMovedProtocol);
-                        }
-                        LocalityListViewService.ServerCustomOrderSave(items);
-                        IoC.Get<ServerListPageViewModel>().CalcServerVisibleAndRefresh();
+                        var reorderedGroupIndex = 0;
+                        var completeOrder = viewModel.VmServerList
+                            .Where(item => item is not ProtocolBaseViewModelDummy)
+                            .OrderBy(item => item.GroupedOrder)
+                            .ThenBy(item => item.CustomOrder)
+                            .ThenBy(item => item.Id)
+                            .Select(item => IsSameDataSource(item, target)
+                                ? reorderedGroup[reorderedGroupIndex++]
+                                : item)
+                            .ToList();
+
+                        // Update the in-memory order immediately; debounce and write the snapshot off the UI thread.
+                        _ = LocalityListViewService.ServerCustomOrderSaveAsync(completeOrder);
+                        viewModel.CalcServerVisibleAndRefresh();
 #if DEBUG
-                        SimpleLogHelper.Debug($"After Drop:" + string.Join(", ", items.Select(x => x.Server.DisplayName)));
+                        SimpleLogHelper.Debug($"After Drop:" + string.Join(", ", reorderedGroup.Select(x => x.Server.DisplayName)));
 #endif
                     }
                 }
                 // group move
                 else if (LvServerCards.IsGrouping == true
-                    && e.Data.GetData("DragSource") is GroupItem { DataContext: CollectionViewGroup { Name: DataSourceBase toBeMovedDataSource } toBeMovedGroupItem }
+                    && e.Data.GetData(DragSourceDataFormat) is GroupItem { DataContext: CollectionViewGroup { Name: DataSourceBase toBeMovedDataSource } toBeMovedGroupItem }
                     && IoC.Get<DataSourceService>().AdditionalSources.Any()
                     && LvServerCards?.Items?.Groups?.Count > 0)
                 {
@@ -373,7 +465,10 @@ namespace FarArc.View.ServerView
                                 {
                                     groups.Insert(targetIdx, toBeMovedGroupItem);
                                 }
-                                LocalityListViewService.GroupedOrderSave(groups.Select(x => x.Name.ToString() ?? "").Where(x => string.IsNullOrEmpty(x) == false).ToArray());
+                                _ = LocalityListViewService.GroupedOrderSaveAsync(groups
+                                    .Select(x => (x.Name as DataSourceBase)?.DataSourceName ?? "")
+                                    .Where(x => string.IsNullOrEmpty(x) == false)
+                                    .ToArray());
                                 IoC.Get<ServerListPageViewModel>().CalcServerVisibleAndRefresh();
 #if DEBUG
                                 SimpleLogHelper.Debug($"groups After Drop:" + string.Join(", ", groups.Select(x => x.Name.ToString())));
@@ -393,6 +488,12 @@ namespace FarArc.View.ServerView
                 };
                 UnifyTracing.Error(ex, properties: ps);
             }
+        }
+
+        private static bool IsSameDataSource(ProtocolBaseViewModel first, ProtocolBaseViewModel second)
+        {
+            return ReferenceEquals(first.DataSource, second.DataSource)
+                   || string.Equals(first.DataSourceName, second.DataSourceName, StringComparison.Ordinal);
         }
 
         private void TagList_PreviewMouseMoveEvent(object sender, MouseEventArgs e)

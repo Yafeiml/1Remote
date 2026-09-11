@@ -19,6 +19,8 @@ namespace FarArc.View.Host.ProtocolHosts
 {
     public partial class AxMsRdpClient09Host : HostBase, IDisposable
     {
+        private bool _isClosing;
+        private bool _hasLoggedInThisAttempt;
         private void BtnCancel_OnClick(object sender, RoutedEventArgs e)
         {
             this.Dispose();
@@ -31,7 +33,7 @@ namespace FarArc.View.Host.ProtocolHosts
 
         public override void ReConn()
         {
-            Debug.Assert(_rdpClient != null);
+            if (_isClosing) return;
             if (Status != ProtocolHostStatus.Connected
                 && Status != ProtocolHostStatus.Disconnected)
             {
@@ -67,10 +69,10 @@ namespace FarArc.View.Host.ProtocolHosts
                     }
                 }
 
-                Status = ProtocolHostStatus.NotInit;
-
                 await Execute.OnUIThreadAsync(() =>
                 {
+                    if (_isClosing) return;
+                    Status = ProtocolHostStatus.NotInit;
                     int w = 0;
                     int h = 0;
                     if (ParentWindow is TabWindowView tab)
@@ -116,29 +118,69 @@ namespace FarArc.View.Host.ProtocolHosts
 
         private int _retryCount = 0;
         private const int MAX_RETRY_COUNT = 5;
+
+        private void ShowConnectionFailure(string reason)
+        {
+            Status = ProtocolHostStatus.Disconnected;
+            RdpHost.Visibility = Visibility.Collapsed;
+            GridLoading.Visibility = Visibility.Collapsed;
+            GridMessageBox.Visibility = Visibility.Visible;
+            TbMessageTitle.Text = IoC.Translate(_flagHasEverConnected ? "Connection lost" : "Connection failed");
+            TbMessageTitle.Visibility = Visibility.Visible;
+            TbMessage.Visibility = Visibility.Visible;
+            TbMessage.Text = $"{_rdpSettings.DisplayName} ({_rdpSettings.Address}:{_rdpSettings.Port})\n\n{reason}";
+            BtnReconn.Visibility = Visibility.Visible;
+            ParentWindowSetToWindow();
+            ParentWindow?.FlashIfNotActive();
+        }
+
         private void OnRdpClientDisconnected(object sender, IMsTscAxEvents_OnDisconnectedEvent e)
         {
             SimpleLogHelper.Debug("RDP Host: RdpOnDisconnected");
 
             lock (this)
             {
-                if (_rdpClient == null) return;
+                if (_rdpClient == null || !ReferenceEquals(sender, _rdpClient)) return;
 
+                var loggedInThisAttempt = _hasLoggedInThisAttempt;
+                _hasLoggedInThisAttempt = false;
+                _flagHasConnected = false;
                 Status = ProtocolHostStatus.Disconnected;
                 ParentWindowResize_StopWatch();
+                _loginResizeTimer.Stop();
 
                 // https://learn.microsoft.com/windows/win32/termserv/imstscaxevents-ondisconnected
                 const int disconnectReasonLocalNotError = 1;  // Local disconnection. This is not an error code. Note that this will also be returned if the user cancels the RdpClient's attempt to reconnect.
                 const int disconnectReasonRemoteByUser = 2;   // Remote disconnection by user (via 'Disconnect', 'Signout', 'Shutdown' and 'Reboot'). This is not an error code.
                 const int disconnectReasonByServer = 3;       // Remote disconnection by server. This will be returned when switching to another connection. This is not an error code.
 
-                string reason = _rdpClient.GetErrorDescription((uint)e.discReason, (uint)_rdpClient.ExtendedDisconnectReason) ?? "";
-                ExtendedDisconnectReasonCode excode = _rdpClient.ExtendedDisconnectReason;
+                var excode = ExtendedDisconnectReasonCode.exDiscReasonNoInfo;
+                string reason = "";
+                try
+                {
+                    excode = _rdpClient.ExtendedDisconnectReason;
+                    reason = _rdpClient.GetErrorDescription(unchecked((uint)e.discReason), (uint)excode) ?? "";
+                }
+                catch (Exception exception)
+                {
+                    UnifyTracing.Error(exception);
+                }
+                if (string.IsNullOrWhiteSpace(reason))
+                    reason = IoC.Translate("The remote connection could not be established or was interrupted.");
+                reason += $"\nRDP: {e.discReason} (0x{e.discReason:X}), extended: {(int)excode}";
                 SimpleLogHelper.Debug($"RDP({_rdpSettings.DisplayName}) Disconnected with code {e.discReason}({reason}) ex:{excode}");
+
+                // A server can reject an initial connection with a nominally normal close code.
+                // Keep the failed attempt visible instead of treating it as a user logoff.
+                if (!_flagHasEverConnected)
+                {
+                    ShowConnectionFailure(reason);
+                    return;
+                }
 
                 switch (e.discReason)
                 {
-                    case disconnectReasonRemoteByUser:
+                    case disconnectReasonRemoteByUser when loggedInThisAttempt:
                         // we can close the window immediately in the case of disconnectReasonRemoteByUser. No further case analysis is needed.
                         RdpClientDispose();
                         base.OnClosed?.Invoke(base.ConnectionId);
@@ -146,12 +188,12 @@ namespace FarArc.View.Host.ProtocolHosts
 
                     case disconnectReasonByServer:
                         // https://learn.microsoft.com/en-us/windows/win32/termserv/extendeddisconnectreasoncode
-                        if (   _rdpClient.ExtendedDisconnectReason == ExtendedDisconnectReasonCode.exDiscReasonAPIInitiatedLogoff              // log out from win2012 by user
-                            || _rdpClient.ExtendedDisconnectReason == ExtendedDisconnectReasonCode.exDiscReasonAPIInitiatedDisconnect          // An application initiated the disconnection.
-                            || _rdpClient.ExtendedDisconnectReason == ExtendedDisconnectReasonCode.exDiscReasonNoInfo                          // log out from win2008 by user
-                            || _rdpClient.ExtendedDisconnectReason == ExtendedDisconnectReasonCode.exDiscReasonLogoffByUser                    // log out from win10 by user
-                            || _rdpClient.ExtendedDisconnectReason == ExtendedDisconnectReasonCode.exDiscReasonRpcInitiatedDisconnectByUser    // log out from win2016 by user
-                            )
+                        if (loggedInThisAttempt && (excode == ExtendedDisconnectReasonCode.exDiscReasonAPIInitiatedLogoff              // log out from win2012 by user
+                            || excode == ExtendedDisconnectReasonCode.exDiscReasonAPIInitiatedDisconnect          // An application initiated the disconnection.
+                            || excode == ExtendedDisconnectReasonCode.exDiscReasonNoInfo                          // log out from win2008 by user
+                            || excode == ExtendedDisconnectReasonCode.exDiscReasonLogoffByUser                    // log out from win10 by user
+                            || excode == ExtendedDisconnectReasonCode.exDiscReasonRpcInitiatedDisconnectByUser    // log out from win2016 by user
+                            ))
                         {
                             // Terminate the session without notifying the user. Because the disconnection is initiated by the user.
                             RdpClientDispose();
@@ -164,13 +206,7 @@ namespace FarArc.View.Host.ProtocolHosts
                             // potential reasons: 
                             // exDiscReasonServerIdleTimeout: user leave and no input for a long time without disconnect or log off, and server set a timeout to drop the session.
                             // exDiscReasonReplacedByOtherConnection: another user (maybe the same user) logon to the server, and the server drop this session.
-                            RdpHost.Visibility = Visibility.Collapsed;
-                            GridMessageBox.Visibility = Visibility.Visible;
-                            TbMessageTitle.Visibility = Visibility.Collapsed;
-                            BtnReconn.Visibility = Visibility.Visible;
-                            TbMessage.Text = reason;
-                            ParentWindowSetToWindow();
-                            this.ParentWindow?.FlashIfNotActive();
+                            ShowConnectionFailure(reason);
                             break;
                         }
 
@@ -198,10 +234,7 @@ namespace FarArc.View.Host.ProtocolHosts
                         {
                             // The number of retries has reached its limit. Display an error.
                             _retryCount = 0;  // Reset for next time.
-                            TbMessageTitle.Visibility = Visibility.Collapsed;
-                            BtnReconn.Visibility = Visibility.Visible;
-                            TbMessage.Text = reason;
-                            ParentWindowSetToWindow();
+                            ShowConnectionFailure(reason);
                         }
                         this.ParentWindow?.FlashIfNotActive();
                         break;
@@ -211,6 +244,7 @@ namespace FarArc.View.Host.ProtocolHosts
 
         private void OnRdpClientConnected(object? sender, EventArgs e)
         {
+            if (_rdpClient == null || !ReferenceEquals(sender, _rdpClient)) return;
             SimpleLogHelper.Debug("RDP Host:  RdpOnOnConnected");
             this.ParentWindow?.FlashIfNotActive();
 
@@ -218,8 +252,7 @@ namespace FarArc.View.Host.ProtocolHosts
             _loginResizeTimer.Start();
 
             _flagHasConnected = true;
-            _flagHasEverConnected = true;
-            _retryCount = 0;
+            Status = ProtocolHostStatus.Connected;
             Execute.OnUIThread(() =>
             {
                 RdpHost.Visibility = Visibility.Visible;
@@ -237,7 +270,12 @@ namespace FarArc.View.Host.ProtocolHosts
 
         private void OnRdpClientLoginComplete(object? sender, EventArgs e)
         {
+            if (_rdpClient == null || !ReferenceEquals(sender, _rdpClient) || !_flagHasConnected) return;
             SimpleLogHelper.Debug("RDP Host:  OnRdpClientLoginComplete");
+            // A transport connection alone does not mean authentication/logon succeeded.
+            _hasLoggedInThisAttempt = true;
+            _flagHasEverConnected = true;
+            _retryCount = 0;
 
             OnCanResizeNowChanged?.Invoke();
             RdpHost.Visibility = Visibility.Visible;

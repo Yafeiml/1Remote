@@ -120,6 +120,7 @@ namespace FarArc
                 Thread.Sleep(5 * 1000);
                 Environment.Exit(1);
             });
+            LocalityListViewService.FlushPendingSave();
             IoC.Get<TaskTrayService>().TaskTrayDispose();
             IoC.Get<SessionControlService>()?.Release();
             if (IoC.Get<LauncherWindowViewModel>()?.View != null)

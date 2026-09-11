@@ -82,7 +82,7 @@ namespace FarArc.View.Host.ProtocolHosts
         /// </summary>
         private bool _flagHasConnected = false;
         /// <summary>
-        /// if has ever connected successfully, then enabled auto reconnect feature
+        /// Enable automatic reconnect only after a completed logon, not just a transport connection.
         /// </summary>
         private bool _flagHasEverConnected = false;
 
@@ -174,6 +174,8 @@ namespace FarArc.View.Host.ProtocolHosts
 
         public void Dispose()
         {
+            if (_isClosing) return;
+            _isClosing = true;
             SimpleLogHelper.Debug($"Disposing {this.GetType().Name}({this.GetHashCode()})");
             _resizeEndTimer?.Dispose();
             _loginResizeTimer?.Dispose();
@@ -296,7 +298,11 @@ namespace FarArc.View.Host.ProtocolHosts
                 {
                     // invoke in the full screen mode.
                     SimpleLogHelper.Debug("RDP Host:  RdpOnConfirmClose");
-                    base.OnClosed?.Invoke(base.ConnectionId);
+                    // Preserve a failure page when the control is no longer connected.
+                    args.pfAllowClose = !_isClosing && ReferenceEquals(sender, _rdpClient)
+                                        && Status == ProtocolHostStatus.Connected;
+                    if (args.pfAllowClose)
+                        base.OnClosed?.Invoke(base.ConnectionId);
                 };
                 _rdpClient.OnConnected += OnRdpClientConnected;
                 _rdpClient.OnLoginComplete += OnRdpClientLoginComplete;
@@ -778,39 +784,31 @@ namespace FarArc.View.Host.ProtocolHosts
             }
             catch (Exception e)
             {
-                GridMessageBox.Visibility = Visibility.Visible;
-                TbMessageTitle.Visibility = Visibility.Collapsed;
-                TbMessage.Text = e.Message;
-
-                Status = ProtocolHostStatus.NotInit;
+                ShowConnectionFailure(e.Message);
             }
         }
 
         #region Base Interface
         public override void Conn()
         {
-            Debug.Assert(_rdpClient != null); if (_rdpClient == null) return;
             Dispatcher.Invoke(() =>
             {
                 try
                 {
-                    if (Status == ProtocolHostStatus.Connected || Status == ProtocolHostStatus.Connecting)
-                    {
+                    if (_isClosing || _rdpClient == null || Status != ProtocolHostStatus.Initialized)
                         return;
-                    }
 
+                    _flagHasConnected = false;
+                    _hasLoggedInThisAttempt = false;
                     Status = ProtocolHostStatus.Connecting;
+                    GridMessageBox.Visibility = Visibility.Collapsed;
                     GridLoading.Visibility = Visibility.Visible;
                     RdpHost.Visibility = Visibility.Collapsed;
                     _rdpClient.Connect();
-                    Status = ProtocolHostStatus.Connected;
                 }
                 catch (Exception e)
                 {
-                    GridMessageBox.Visibility = Visibility.Visible;
-                    TbMessageTitle.Visibility = Visibility.Collapsed;
-                    TbMessage.Text = e.Message;
-                    Status = ProtocolHostStatus.Disconnected;
+                    ShowConnectionFailure(e.Message);
                 }
             });
         }
@@ -932,7 +930,12 @@ namespace FarArc.View.Host.ProtocolHosts
                 {
                     if (_rdpClient is { IsDisposed: false })
                     {
-                        _rdpClient.Dispose();
+                        var client = _rdpClient;
+                        _rdpClient = null;
+                        client.OnDisconnected -= OnRdpClientDisconnected;
+                        client.OnConnected -= OnRdpClientConnected;
+                        client.OnLoginComplete -= OnRdpClientLoginComplete;
+                        client.Dispose();
                     }
                     _rdpClient = null;
                 }
